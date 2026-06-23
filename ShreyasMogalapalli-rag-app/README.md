@@ -1,8 +1,6 @@
-# 🧠 RAG Chatbot — Local AI Document Q&A
+🧠 RAG Chatbot — Local AI Document Q&A
 
 A fully local, privacy-first **Retrieval-Augmented Generation (RAG)** chatbot built with **Streamlit** and **Ollama**. Upload any PDF or text document, ask questions, and get answers grounded in your document — all processing happens on your machine.
-
----
 
 ## 📄 What Document Did I Use and Why?
 
@@ -15,9 +13,9 @@ This RAG app is designed to work with **any PDF, TXT, or Markdown document** you
 
 **Why this approach?** Rather than building around one fixed document, the app lets you drop any file into `data/` and index it instantly from the sidebar. This makes it reusable across any domain — legal, medical, academic, or personal notes.
 
----
 
-## ✂️ How Does Your Chunking Work?
+
+✂️ How Does Your Chunking Work?
 
 Chunking is handled in `utils/loader.py` using a **character-based sliding window with sentence-boundary awareness**.
 
