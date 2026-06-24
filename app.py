@@ -1,17 +1,25 @@
 """
-app.py - RAG Chatbot with 3 modes:
+app.py - RAG Chatbot with 3 modes: 
   💬 Normal Chat  — plain LLM conversation, no docs needed
   📄 Document     — upload PDF/TXT/MD, chat grounded in file
   🌐 URL          — paste a URL, chat grounded in that page
 """
 
+import os
 import re
 import requests
 import streamlit as st
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from utils.loader import load_and_chunk, chunk_text
-from utils.embedder import embed_chunks, embed_query, check_ollama_connection, list_available_models
+from utils.embedder import (
+    embed_chunks, embed_query, 
+    check_groq_api_key, list_available_chat_models,
+    check_ollama_connection, list_available_ollama_models
+)
 from utils.retriever import VectorStore, build_context
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -55,8 +63,8 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
     font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem;
     padding: 2px 8px; border-radius: 4px; margin: 2px 3px; border: 1px solid #334155;
 }
-.status-ok  { color: #00ff9d; font-weight: 600; }
-.status-err { color: #ff4d6d; font-weight: 600; }
+.status-ok  { color: #00ff9d; font-weight: 600; margin-bottom: 10px; display: inline-block;}
+.status-err { color: #ff4d6d; font-weight: 600; margin-bottom: 10px; display: inline-block;}
 
 .metric-box {
     background: #111827; border: 1px solid #1e293b;
@@ -76,7 +84,7 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 1px solid #1e2
     background: #00cc7d; transform: translateY(-1px);
     box-shadow: 0 4px 15px rgba(0,255,157,0.3);
 }
-.stSelectbox label, .stSlider label, .stFileUploader label, .stTextInput label {
+.stSelectbox label, .stSlider label, .stFileUploader label, .stTextInput label, .stRadio label {
     color: #94a3b8 !important; font-size: 0.85rem !important;
 }
 .stTextInput > div > div > input {
@@ -90,7 +98,7 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 1px solid #1e2
     border-radius: 8px; padding: 8px 20px;
 }
 .stTabs [aria-selected="true"] { background: #1e293b !important; color: #e8e8e8 !important; }
-hr { border-color: #1e293b; }
+hr { border-color: #1e293b; margin: 1.5rem 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -125,6 +133,22 @@ def scrape_url(url: str) -> str:
     return text
 
 
+def call_groq(prompt: str, model: str, temperature: float, api_key: str) -> str:
+    from groq import Groq
+    if not api_key:
+        return "⚠️ Please enter your Groq API key in the sidebar."
+    try:
+        client = Groq(api_key=api_key)
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            stream=False
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ Groq API error: {e}"
+
 def call_ollama(prompt: str, model: str, temperature: float) -> str:
     try:
         resp = requests.post(
@@ -139,7 +163,6 @@ def call_ollama(prompt: str, model: str, temperature: float) -> str:
         return "⚠️ Request timed out. Try a smaller model."
     except Exception as e:
         return f"⚠️ Ollama error: {e}"
-
 
 def plain_prompt(question: str, history: list) -> str:
     hist = "".join(f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}\n" for m in history[-6:])
@@ -185,34 +208,64 @@ def empty_state(icon: str, line1: str, line2: str = ""):
     </div>""", unsafe_allow_html=True)
 
 
+def format_chat_history(history: list) -> str:
+    out = ""
+    for msg in history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        out += f"**{role}**: {msg['content']}\n\n"
+        if msg.get("sources"):
+            out += f"_Sources: {', '.join(msg['sources'])}_\n\n"
+        out += "---\n\n"
+    return out
+
+
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="main-title">🧠 RAG Chat</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-title">local · private · offline</div>', unsafe_allow_html=True)
-
-    ollama_ok = check_ollama_connection()
-    st.markdown(
-        f'<span class="{"status-ok" if ollama_ok else "status-err"}">{"● Ollama connected" if ollama_ok else "● Ollama offline"}</span>',
-        unsafe_allow_html=True
-    )
-    if not ollama_ok:
-        st.error("Run `ollama serve` in a terminal.")
+    st.markdown('<div class="sub-title">Dual Interface</div>', unsafe_allow_html=True)
+    
+    st.markdown("**⚙️ AI Backend**")
+    backend = st.radio("Provider", ["☁️ Groq (Cloud)", "🖥️ Ollama (Local)"], label_visibility="collapsed")
+    is_groq = "Groq" in backend
+    
+    st.divider()
+    
+    if is_groq:
+        st.markdown("**🔑 Groq API Key (BYOK)**")
+        groq_api_key = os.getenv("GROQ_API_KEY", "")
+        api_key_input = st.text_input("Groq API Key", value=groq_api_key, type="password", placeholder="gsk_...", label_visibility="collapsed")
+        if api_key_input:
+            os.environ["GROQ_API_KEY"] = api_key_input
+            groq_api_key = api_key_input
+        
+        api_ok = check_groq_api_key(groq_api_key)
+        st.markdown(f'<span class="{"status-ok" if api_ok else "status-err"}">{"● API Connected" if api_ok else "● Missing/Invalid Key"}</span>', unsafe_allow_html=True)
+        
+        st.markdown("**Groq Model**")
+        chat_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-70b-8192",
+            "mixtral-8x7b-32768",
+            "qwen-2.5-coder-32b"
+        ]
+        sel_chat = st.radio("Groq Model", chat_models, label_visibility="collapsed")
+        
+    else:
+        st.markdown("**🖥️ Local Status**")
+        api_ok = check_ollama_connection()
+        st.markdown(f'<span class="{"status-ok" if api_ok else "status-err"}">{"● Ollama Connected" if api_ok else "● Ollama Offline"}</span>', unsafe_allow_html=True)
+        if not api_ok:
+            st.error("Run `ollama serve` in your terminal to connect.")
+            
+        st.markdown("**Ollama Model**")
+        chat_models = list_available_ollama_models() or ["llama3.1:8b", "qwen2.5:7b"]
+        sel_chat = st.radio("Ollama Model", chat_models, label_visibility="collapsed")
 
     st.divider()
 
-    st.markdown("**⚙️ Model Settings**")
-    available   = list_available_models()
-    chat_models = [m for m in available if "embed" not in m.lower()] or \
-                  ["llama3.1:8b", "qwen2.5:7b", "deepseek-r1:8b", "gemma2:2b", "llama3:latest"]
-    emb_models  = [m for m in available if "embed" in m.lower()] or ["nomic-embed-text:latest"]
-
-    sel_chat = st.selectbox("Chat Model", chat_models,
-                             index=chat_models.index("llama3.1:8b") if "llama3.1:8b" in chat_models else 0)
-    sel_emb  = st.selectbox("Embedding Model", emb_models, index=0)
-
-    st.divider()
-
-    st.markdown("**📐 RAG Settings**")
+    st.markdown("**📐 Embeddings & RAG Settings**")
+    sel_emb  = st.selectbox("Embedding Model", ["all-MiniLM-L6-v2 (Local)"], index=0)
     top_k         = st.slider("Top-K chunks",        1,    10,   5)
     chunk_size    = st.slider("Chunk size (chars)", 200, 1000, 500, step=50)
     chunk_overlap = st.slider("Overlap (chars)",      0,  200,  50, step=10)
@@ -241,7 +294,7 @@ with st.sidebar:
 
 # ── MAIN — 3 TABS ─────────────────────────────────────────────────────────────
 st.markdown('<div class="main-title">RAG Chatbot</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Powered by Ollama · 100% local · 3 modes</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Dual Interface (Cloud/Local) · 3 modes</div>', unsafe_allow_html=True)
 
 tab_chat, tab_doc, tab_url = st.tabs(["💬  Normal Chat", "📄  Document", "🌐  URL"])
 
@@ -256,20 +309,29 @@ with tab_chat:
 
     if not st.session_state.chat_history:
         empty_state("💬", "Just start typing below", "No setup needed — pure LLM conversation")
+    else:
+        st.download_button(
+            label="💾 Download Chat",
+            data=format_chat_history(st.session_state.chat_history),
+            file_name="chat_history.md",
+            mime="text/markdown",
+            key="dl_chat"
+        )
 
     st.divider()
     user_input_chat = st.chat_input("Ask me anything…", key="input_chat")
 
     if user_input_chat:
-        if not ollama_ok:
-            st.error("Ollama is offline. Run `ollama serve`.")
+        if not api_ok:
+            st.error("Please configure your AI backend in the sidebar first.")
         else:
             st.session_state.chat_history.append({"role": "user", "content": user_input_chat})
             with st.spinner(f"🤖 Thinking with {sel_chat}…"):
-                answer = call_ollama(
-                    plain_prompt(user_input_chat, st.session_state.chat_history[:-1]),
-                    sel_chat, temperature
-                )
+                prompt = plain_prompt(user_input_chat, st.session_state.chat_history[:-1])
+                if is_groq:
+                    answer = call_groq(prompt, sel_chat, temperature, groq_api_key)
+                else:
+                    answer = call_ollama(prompt, sel_chat, temperature)
             st.session_state.chat_history.append({"role": "assistant", "content": answer, "sources": []})
             st.rerun()
 
@@ -337,13 +399,21 @@ with tab_doc:
             empty_state("📄", "Document indexed! Ask a question below", "Answers will be sourced from your file")
         else:
             empty_state("📂", "Upload and index a document first", "Use the panel above ↑")
+    else:
+        st.download_button(
+            label="💾 Download Chat",
+            data=format_chat_history(st.session_state.doc_history),
+            file_name="doc_chat_history.md",
+            mime="text/markdown",
+            key="dl_doc"
+        )
 
     st.divider()
     user_input_doc = st.chat_input("Ask about your document…", key="input_doc")
 
     if user_input_doc:
-        if not ollama_ok:
-            st.error("Ollama is offline. Run `ollama serve`.")
+        if not api_ok:
+            st.error("Please configure your AI backend in the sidebar first.")
         elif not st.session_state.doc_store.is_ready():
             st.warning("⚠️ Upload and index a document first (expand the panel above).")
         else:
@@ -354,7 +424,11 @@ with tab_doc:
                 context = build_context(results)
                 sources = list(dict.fromkeys(r["source"] for r in results))
             with st.spinner(f"🤖 Generating with {sel_chat}…"):
-                answer = call_ollama(rag_prompt(user_input_doc, context, st.session_state.doc_history[:-1]), sel_chat, temperature)
+                prompt = rag_prompt(user_input_doc, context, st.session_state.doc_history[:-1])
+                if is_groq:
+                    answer = call_groq(prompt, sel_chat, temperature, groq_api_key)
+                else:
+                    answer = call_ollama(prompt, sel_chat, temperature)
             st.session_state.doc_history.append({"role": "assistant", "content": answer, "sources": sources})
             st.rerun()
 
@@ -402,13 +476,21 @@ with tab_url:
             empty_state("🌐", "URL indexed! Ask about it below", "Answers will be sourced from the webpage")
         else:
             empty_state("🔗", "Paste and fetch a URL first", "Use the panel above ↑")
+    else:
+        st.download_button(
+            label="💾 Download Chat",
+            data=format_chat_history(st.session_state.url_history),
+            file_name="url_chat_history.md",
+            mime="text/markdown",
+            key="dl_url"
+        )
 
     st.divider()
     user_input_url = st.chat_input("Ask about the webpage…", key="input_url")
 
     if user_input_url:
-        if not ollama_ok:
-            st.error("Ollama is offline. Run `ollama serve`.")
+        if not api_ok:
+            st.error("Please configure your AI backend in the sidebar first.")
         elif not st.session_state.url_store.is_ready():
             st.warning("⚠️ Fetch and index a URL first (expand the panel above).")
         else:
@@ -419,6 +501,10 @@ with tab_url:
                 context = build_context(results)
                 sources = list(dict.fromkeys(r["source"] for r in results))
             with st.spinner(f"🤖 Generating with {sel_chat}…"):
-                answer = call_ollama(rag_prompt(user_input_url, context, st.session_state.url_history[:-1]), sel_chat, temperature)
+                prompt = rag_prompt(user_input_url, context, st.session_state.url_history[:-1])
+                if is_groq:
+                    answer = call_groq(prompt, sel_chat, temperature, groq_api_key)
+                else:
+                    answer = call_ollama(prompt, sel_chat, temperature)
             st.session_state.url_history.append({"role": "assistant", "content": answer, "sources": sources})
             st.rerun()
